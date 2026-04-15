@@ -5,13 +5,15 @@
  * resolution, and error formatting live in one place.
  */
 
+import { getContinuumAccessToken } from './asyncToken.js';
+
 function resolveBaseUrl(): string {
     const raw = process.env.CONTINUUM_API_BASE_URL?.trim() || 'http://127.0.0.1:8001/api/v1';
     return raw.replace(/\/$/, '');
 }
 
 function resolveToken(): string {
-    const token = process.env.CONTINUUM_ACCESS_TOKEN?.trim() || '';
+    const token = getContinuumAccessToken();
     if (!token) {
         throw new Error(
             'CONTINUUM_ACCESS_TOKEN is not set. ' +
