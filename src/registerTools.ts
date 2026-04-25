@@ -1,6 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import * as z from 'zod';
-import { fetchJson } from './continuumApi.js';
+import { fetchBytes, fetchJson } from './continuumApi.js';
 
 interface TaskSummary {
     id: number;
@@ -224,6 +224,30 @@ function formatAttachment(a: TaskAttachment): string {
     return `#${a.id} [${kind}] ${a.original_filename}\n  mime: ${a.mime_type}\n  size: ${size}\n  uploader: ${who}\n  download_url: ${directUrl}${created}`;
 }
 
+function parseFilenameFromContentDisposition(contentDisposition: string | null): string | null {
+    if (!contentDisposition) return null;
+    const utf8Match = /filename\*=UTF-8''([^;]+)/i.exec(contentDisposition);
+    if (utf8Match?.[1]) {
+        try {
+            return decodeURIComponent(utf8Match[1]).trim();
+        } catch {
+            return utf8Match[1].trim();
+        }
+    }
+    const plainMatch = /filename="?([^";]+)"?/i.exec(contentDisposition);
+    return plainMatch?.[1]?.trim() || null;
+}
+
+function isTextMime(mimeType: string): boolean {
+    return (
+        mimeType.startsWith('text/') ||
+        mimeType.includes('json') ||
+        mimeType.includes('xml') ||
+        mimeType.includes('javascript') ||
+        mimeType.includes('yaml')
+    );
+}
+
 const plannerMessageSchema = z.object({
     role: z.enum(['user', 'assistant']),
     content: z.string().min(1),
@@ -428,19 +452,75 @@ export function registerContinuumTools(server: McpServer): void {
         'continuum_get_task_resource',
         {
             description:
-                'Get metadata and direct URL for one task resource/attachment by id. ' +
-                'Useful when you already know the attachment id and want to fetch it.',
+                'Get one task resource/attachment by id via authenticated MCP proxy. ' +
+                'Returns inline text content for text files and metadata/preview info for binary files.',
             inputSchema: {
                 attachment_id: z.number().int().positive().describe('Numeric attachment id'),
+                text_max_chars: z
+                    .number()
+                    .int()
+                    .min(200)
+                    .max(200000)
+                    .default(20000)
+                    .describe('Max text characters to return when attachment is text-like'),
             },
         },
-        async ({ attachment_id }) => {
+        async ({ attachment_id, text_max_chars }) => {
             const directUrl = `${resolveApiBaseUrl()}/attachments/${attachment_id}/download`;
+            const downloaded = await fetchBytes('GET', `/attachments/${attachment_id}/download`);
+            const contentType = (downloaded.contentType || 'application/octet-stream').toLowerCase();
+            const filename =
+                parseFilenameFromContentDisposition(downloaded.contentDisposition) ||
+                `attachment-${attachment_id}`;
+            const size = downloaded.bytes.length;
+
+            if (isTextMime(contentType)) {
+                const fullText = new TextDecoder('utf-8').decode(downloaded.bytes);
+                const clipped = fullText.length > text_max_chars;
+                const text = clipped ? `${fullText.slice(0, text_max_chars)}\n\n…[truncated]` : fullText;
+                return textResult(
+                    [
+                        `Attachment #${attachment_id} (${filename})`,
+                        `mime: ${contentType}`,
+                        `size: ${size} bytes`,
+                        '',
+                        '--- content ---',
+                        text,
+                    ].join('\n'),
+                );
+            }
+
+            if (contentType.startsWith('image/')) {
+                const base64 = Buffer.from(downloaded.bytes).toString('base64');
+                return {
+                    content: [
+                        {
+                            type: 'text' as const,
+                            text: [
+                                `Attachment #${attachment_id} (${filename})`,
+                                `mime: ${contentType}`,
+                                `size: ${size} bytes`,
+                                'Fetched via authenticated MCP proxy.',
+                                `direct_url: ${directUrl}`,
+                            ].join('\n'),
+                        },
+                        {
+                            type: 'image' as const,
+                            data: base64,
+                            mimeType: contentType,
+                        },
+                    ],
+                };
+            }
+
             return textResult(
                 [
-                    `Attachment #${attachment_id}`,
-                    `download_url: ${directUrl}`,
-                    'Use this URL with Continuum auth to download/open the resource.',
+                    `Attachment #${attachment_id} (${filename})`,
+                    `mime: ${contentType}`,
+                    `size: ${size} bytes`,
+                    'Binary attachment fetched via authenticated MCP proxy.',
+                    'Inline rendering is only enabled for text and image resources.',
+                    `direct_url: ${directUrl}`,
                 ].join('\n'),
             );
         },

@@ -66,3 +66,46 @@ export async function fetchJson<T = unknown>(
     if (!text) return undefined as T;
     return JSON.parse(text) as T;
 }
+
+export interface FetchBytesResponse {
+    bytes: Uint8Array;
+    contentType: string | null;
+    contentDisposition: string | null;
+}
+
+export async function fetchBytes(
+    method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
+    path: string,
+    body?: unknown,
+): Promise<FetchBytesResponse> {
+    const url = `${resolveBaseUrl()}${path}`;
+    const headers: Record<string, string> = {
+        Authorization: `Bearer ${resolveToken()}`,
+    };
+    if (body !== undefined) {
+        headers['Content-Type'] = 'application/json';
+    }
+    const res = await fetch(url, {
+        method,
+        headers,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+    if (!res.ok) {
+        const text = await res.text();
+        if (res.status === 401) {
+            throw new ContinuumApiError(
+                res.status,
+                'Authentication failed — your CONTINUUM_ACCESS_TOKEN has likely expired. ' +
+                    'Copy a fresh JWT from the Continuum web app (Local Storage → auth-storage → accessToken) ' +
+                    'and update your .cursor/mcp.json, then restart Cursor.',
+            );
+        }
+        throw new ContinuumApiError(res.status, text);
+    }
+    const arr = new Uint8Array(await res.arrayBuffer());
+    return {
+        bytes: arr,
+        contentType: res.headers.get('content-type'),
+        contentDisposition: res.headers.get('content-disposition'),
+    };
+}
