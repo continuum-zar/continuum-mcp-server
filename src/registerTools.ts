@@ -40,6 +40,30 @@ interface Comment {
     created_at: string;
 }
 
+interface AttachmentUploader {
+    id: number;
+    email?: string;
+    first_name?: string;
+    last_name?: string;
+    display_name?: string | null;
+}
+
+interface TaskAttachment {
+    id: number;
+    original_filename: string;
+    file_size: number;
+    mime_type: string;
+    url?: string | null;
+    file_path?: string;
+    created_at?: string;
+    uploader?: AttachmentUploader;
+}
+
+interface TaskAttachmentList {
+    attachments: TaskAttachment[];
+    total: number;
+}
+
 interface PlannerMessage {
     role: 'user' | 'assistant';
     content: string;
@@ -134,6 +158,11 @@ function textResult(text: string) {
     return { content: [{ type: 'text' as const, text }] };
 }
 
+function resolveApiBaseUrl(): string {
+    const raw = process.env.CONTINUUM_API_BASE_URL?.trim() || 'http://127.0.0.1:8001/api/v1';
+    return raw.replace(/\/$/, '');
+}
+
 function formatTaskSummary(t: TaskSummary): string {
     const parts = [`#${t.id} [${t.status}] ${t.title}`];
     if (t.assigned_to) parts.push(`  assigned_to: ${t.assigned_to}`);
@@ -180,6 +209,19 @@ function formatPlanSummary(result: ProjectPlanResponse): string {
         '## Milestones',
         milestoneLines.join('\n\n') || '(none)',
     ].join('\n');
+}
+
+function formatAttachment(a: TaskAttachment): string {
+    const who =
+        a.uploader?.display_name ||
+        [a.uploader?.first_name, a.uploader?.last_name].filter(Boolean).join(' ').trim() ||
+        a.uploader?.email ||
+        (a.uploader?.id ? `user ${a.uploader.id}` : 'unknown uploader');
+    const size = a.file_size != null ? `${a.file_size} bytes` : 'unknown size';
+    const kind = a.url || a.mime_type === 'text/uri-list' ? 'link' : 'file';
+    const directUrl = a.url || `${resolveApiBaseUrl()}/attachments/${a.id}/download`;
+    const created = a.created_at ? `\n  created_at: ${a.created_at}` : '';
+    return `#${a.id} [${kind}] ${a.original_filename}\n  mime: ${a.mime_type}\n  size: ${size}\n  uploader: ${who}\n  download_url: ${directUrl}${created}`;
 }
 
 const plannerMessageSchema = z.object({
@@ -356,6 +398,50 @@ export function registerContinuumTools(server: McpServer): void {
             const t = await fetchJson<TaskFull>('GET', `/tasks/${task_id}`);
             return textResult(
                 `# Task #${t.id} (raw)\n\n` + '```json\n' + JSON.stringify(t, null, 2) + '\n```',
+            );
+        },
+    );
+
+    server.registerTool(
+        'continuum_list_task_resources',
+        {
+            description:
+                'List files and links attached to a Continuum task (Resources). ' +
+                'Returns metadata and a download/open URL for each attachment.',
+            inputSchema: {
+                task_id: z.number().int().positive().describe('Numeric task id'),
+            },
+        },
+        async ({ task_id }) => {
+            const list = await fetchJson<TaskAttachmentList>('GET', `/tasks/${task_id}/attachments`);
+            if (!list.attachments.length) {
+                return textResult(`Task #${task_id} has no attached resources.`);
+            }
+            const lines = list.attachments.map(formatAttachment);
+            return textResult(
+                `Task #${task_id} resources (${list.total}):\n\n${lines.join('\n\n')}`,
+            );
+        },
+    );
+
+    server.registerTool(
+        'continuum_get_task_resource',
+        {
+            description:
+                'Get metadata and direct URL for one task resource/attachment by id. ' +
+                'Useful when you already know the attachment id and want to fetch it.',
+            inputSchema: {
+                attachment_id: z.number().int().positive().describe('Numeric attachment id'),
+            },
+        },
+        async ({ attachment_id }) => {
+            const directUrl = `${resolveApiBaseUrl()}/attachments/${attachment_id}/download`;
+            return textResult(
+                [
+                    `Attachment #${attachment_id}`,
+                    `download_url: ${directUrl}`,
+                    'Use this URL with Continuum auth to download/open the resource.',
+                ].join('\n'),
             );
         },
     );
