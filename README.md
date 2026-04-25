@@ -96,7 +96,7 @@ npm run start:http
 | `continuum_planner_chat` | Ask the AI planner follow-up questions with optional Figma design context |
 | `continuum_generate_plan` | Generate reviewable milestones/tasks from planner context and optional Figma design context |
 | `continuum_list_task_resources` | List attached task resources (files/links) with metadata and URLs |
-| `continuum_get_task_resource` | Get a direct download/open URL for one attachment id |
+| `continuum_get_task_resource` | Fetch one attachment through MCP auth (inline text/image preview + metadata) |
 
 ### Figma-assisted planning
 
