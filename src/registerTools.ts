@@ -40,6 +40,80 @@ interface Comment {
     created_at: string;
 }
 
+interface AttachmentUploader {
+    id: number;
+    email?: string;
+    first_name?: string;
+    last_name?: string;
+    display_name?: string | null;
+}
+
+interface TaskAttachment {
+    id: number;
+    original_filename: string;
+    file_size: number;
+    mime_type: string;
+    url?: string | null;
+    file_path?: string;
+    created_at?: string;
+    uploader?: AttachmentUploader;
+}
+
+interface TaskAttachmentList {
+    attachments: TaskAttachment[];
+    total: number;
+}
+
+interface PlannerMessage {
+    role: 'user' | 'assistant';
+    content: string;
+}
+
+interface PlannerFileContent {
+    filename: string;
+    text: string;
+}
+
+interface FigmaContext {
+    file_key: string;
+    node_id?: string | null;
+    url?: string | null;
+    source_name?: string | null;
+    summary: string;
+    components?: string[];
+    tokens?: string[];
+    interactions?: string[];
+    screenshots?: string[];
+}
+
+interface PlannerChatResponse {
+    reply: string;
+    confidence: number;
+    missing_areas: string[];
+    ready_to_plan: boolean;
+}
+
+interface ProjectPlanResponse {
+    plan: {
+        project_name: string;
+        project_description: string;
+        summary: string;
+        reasoning?: string;
+        milestones: Array<{
+            name: string;
+            description?: string | null;
+            tasks: Array<{
+                title: string;
+                description?: string | null;
+                scope_weight: string;
+                labels?: string[];
+                checklist?: Array<{ title: string; is_completed: boolean }>;
+            }>;
+        }>;
+    };
+    confidence: number;
+}
+
 interface CursorMcpTaskDetail {
     id: number;
     project_id: number;
@@ -84,6 +158,11 @@ function textResult(text: string) {
     return { content: [{ type: 'text' as const, text }] };
 }
 
+function resolveApiBaseUrl(): string {
+    const raw = process.env.CONTINUUM_API_BASE_URL?.trim() || 'http://127.0.0.1:8001/api/v1';
+    return raw.replace(/\/$/, '');
+}
+
 function formatTaskSummary(t: TaskSummary): string {
     const parts = [`#${t.id} [${t.status}] ${t.title}`];
     if (t.assigned_to) parts.push(`  assigned_to: ${t.assigned_to}`);
@@ -107,6 +186,65 @@ function formatComment(c: Comment): string {
     const who = c.author.display_name || c.author.username || `User ${c.author.id}`;
     return `[${c.created_at}] ${who}:\n${c.content}`;
 }
+
+function formatPlanSummary(result: ProjectPlanResponse): string {
+    const plan = result.plan;
+    const taskCount = plan.milestones.reduce((sum, milestone) => sum + milestone.tasks.length, 0);
+    const milestoneLines = plan.milestones.map((milestone, index) => {
+        const tasks = milestone.tasks.map((task) => `  - ${task.title}`).join('\n');
+        return `${index + 1}. ${milestone.name} (${milestone.tasks.length} task(s))\n${tasks}`;
+    });
+    return [
+        `# ${plan.project_name}`,
+        '',
+        plan.project_description,
+        '',
+        `Confidence: ${Math.round(result.confidence)}%`,
+        `Milestones: ${plan.milestones.length}`,
+        `Tasks: ${taskCount}`,
+        '',
+        '## Summary',
+        plan.summary || '(none)',
+        '',
+        '## Milestones',
+        milestoneLines.join('\n\n') || '(none)',
+    ].join('\n');
+}
+
+function formatAttachment(a: TaskAttachment): string {
+    const who =
+        a.uploader?.display_name ||
+        [a.uploader?.first_name, a.uploader?.last_name].filter(Boolean).join(' ').trim() ||
+        a.uploader?.email ||
+        (a.uploader?.id ? `user ${a.uploader.id}` : 'unknown uploader');
+    const size = a.file_size != null ? `${a.file_size} bytes` : 'unknown size';
+    const kind = a.url || a.mime_type === 'text/uri-list' ? 'link' : 'file';
+    const directUrl = a.url || `${resolveApiBaseUrl()}/attachments/${a.id}/download`;
+    const created = a.created_at ? `\n  created_at: ${a.created_at}` : '';
+    return `#${a.id} [${kind}] ${a.original_filename}\n  mime: ${a.mime_type}\n  size: ${size}\n  uploader: ${who}\n  download_url: ${directUrl}${created}`;
+}
+
+const plannerMessageSchema = z.object({
+    role: z.enum(['user', 'assistant']),
+    content: z.string().min(1),
+});
+
+const plannerFileContentSchema = z.object({
+    filename: z.string().min(1),
+    text: z.string().min(1),
+});
+
+const figmaContextSchema = z.object({
+    file_key: z.string().min(1),
+    node_id: z.string().nullable().optional(),
+    url: z.string().nullable().optional(),
+    source_name: z.string().nullable().optional(),
+    summary: z.string().min(1),
+    components: z.array(z.string()).optional(),
+    tokens: z.array(z.string()).optional(),
+    interactions: z.array(z.string()).optional(),
+    screenshots: z.array(z.string()).optional(),
+});
 
 /** Register all Continuum MCP tools on the given server (stdio or HTTP). */
 export function registerContinuumTools(server: McpServer): void {
@@ -141,6 +279,76 @@ export function registerContinuumTools(server: McpServer): void {
             if (!tasks.length) return textResult('No tasks found matching the filters.');
             const lines = tasks.map(formatTaskSummary);
             return textResult(`Found ${tasks.length} task(s):\n\n${lines.join('\n\n')}`);
+        },
+    );
+
+    server.registerTool(
+        'continuum_planner_chat',
+        {
+            description:
+                'Send messages to the Continuum AI project planner. Optionally include Figma design ' +
+                'context gathered from the official Figma MCP so the planner can ask better follow-up questions.',
+            inputSchema: {
+                messages: z.array(plannerMessageSchema).min(1).describe('Planner conversation so far'),
+                file_contents: z
+                    .array(plannerFileContentSchema)
+                    .default([])
+                    .describe('Optional uploaded/spec-like text context'),
+                figma_context: figmaContextSchema
+                    .optional()
+                    .describe('Optional structured Figma design context from a frame or node'),
+            },
+        },
+        async ({ messages, file_contents, figma_context }) => {
+            const body = {
+                messages: messages as PlannerMessage[],
+                file_contents: file_contents as PlannerFileContent[],
+                figma_context: figma_context as FigmaContext | undefined,
+            };
+            const res = await fetchJson<PlannerChatResponse>('POST', '/planner/chat', body);
+            const missing = res.missing_areas?.length
+                ? `\n\nMissing areas:\n${res.missing_areas.map((area) => `- ${area}`).join('\n')}`
+                : '';
+            return textResult(
+                `${res.reply}\n\nConfidence: ${Math.round(res.confidence)}%\nReady to plan: ${
+                    res.ready_to_plan ? 'yes' : 'no'
+                }${missing}`,
+            );
+        },
+    );
+
+    server.registerTool(
+        'continuum_generate_plan',
+        {
+            description:
+                'Generate a Continuum project plan from planner messages, optional specs, and optional ' +
+                'Figma design context. Returns reviewable milestones and tasks; it does not create the project.',
+            inputSchema: {
+                messages: z.array(plannerMessageSchema).min(1).describe('Planner conversation so far'),
+                file_contents: z
+                    .array(plannerFileContentSchema)
+                    .default([])
+                    .describe('Optional uploaded/spec-like text context'),
+                figma_context: figmaContextSchema
+                    .optional()
+                    .describe('Optional structured Figma design context from a frame or node'),
+                raw_json: z
+                    .boolean()
+                    .default(false)
+                    .describe('Return the full raw plan JSON instead of a compact markdown summary'),
+            },
+        },
+        async ({ messages, file_contents, figma_context, raw_json }) => {
+            const body = {
+                messages: messages as PlannerMessage[],
+                file_contents: file_contents as PlannerFileContent[],
+                figma_context: figma_context as FigmaContext | undefined,
+            };
+            const res = await fetchJson<ProjectPlanResponse>('POST', '/planner/generate-plan', body);
+            if (raw_json) {
+                return textResult('```json\n' + JSON.stringify(res, null, 2) + '\n```');
+            }
+            return textResult(formatPlanSummary(res));
         },
     );
 
@@ -190,6 +398,50 @@ export function registerContinuumTools(server: McpServer): void {
             const t = await fetchJson<TaskFull>('GET', `/tasks/${task_id}`);
             return textResult(
                 `# Task #${t.id} (raw)\n\n` + '```json\n' + JSON.stringify(t, null, 2) + '\n```',
+            );
+        },
+    );
+
+    server.registerTool(
+        'continuum_list_task_resources',
+        {
+            description:
+                'List files and links attached to a Continuum task (Resources). ' +
+                'Returns metadata and a download/open URL for each attachment.',
+            inputSchema: {
+                task_id: z.number().int().positive().describe('Numeric task id'),
+            },
+        },
+        async ({ task_id }) => {
+            const list = await fetchJson<TaskAttachmentList>('GET', `/tasks/${task_id}/attachments`);
+            if (!list.attachments.length) {
+                return textResult(`Task #${task_id} has no attached resources.`);
+            }
+            const lines = list.attachments.map(formatAttachment);
+            return textResult(
+                `Task #${task_id} resources (${list.total}):\n\n${lines.join('\n\n')}`,
+            );
+        },
+    );
+
+    server.registerTool(
+        'continuum_get_task_resource',
+        {
+            description:
+                'Get metadata and direct URL for one task resource/attachment by id. ' +
+                'Useful when you already know the attachment id and want to fetch it.',
+            inputSchema: {
+                attachment_id: z.number().int().positive().describe('Numeric attachment id'),
+            },
+        },
+        async ({ attachment_id }) => {
+            const directUrl = `${resolveApiBaseUrl()}/attachments/${attachment_id}/download`;
+            return textResult(
+                [
+                    `Attachment #${attachment_id}`,
+                    `download_url: ${directUrl}`,
+                    'Use this URL with Continuum auth to download/open the resource.',
+                ].join('\n'),
             );
         },
     );
