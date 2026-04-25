@@ -93,6 +93,28 @@ npm run start:http
 | `continuum_set_task_status` | `todo` / `in_progress` / `done` |
 | `continuum_update_task_checklists` | Safe merge + PUT |
 | `continuum_add_comment` | Post a comment |
+| `continuum_planner_chat` | Ask the AI planner follow-up questions with optional Figma design context |
+| `continuum_generate_plan` | Generate reviewable milestones/tasks from planner context and optional Figma design context |
+
+### Figma-assisted planning
+
+Configure this server alongside the official Figma MCP server when you want design-aware planning:
+
+```json
+{
+  "mcpServers": {
+    "continuum": {
+      "url": "https://your-continuum-mcp.example.com/mcp"
+    },
+    "Figma": {
+      "url": "https://mcp.figma.com/mcp"
+    }
+  }
+}
+```
+
+Use Figma MCP to read frame/component context, then pass the resulting summary into
+`continuum_planner_chat` or `continuum_generate_plan` as `figma_context`.
 
 ---
 
