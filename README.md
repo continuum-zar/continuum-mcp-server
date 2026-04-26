@@ -95,6 +95,7 @@ npm run start:http
 | `continuum_add_comment` | Post a comment |
 | `continuum_planner_chat` | Ask the AI planner follow-up questions with optional Figma design context |
 | `continuum_generate_plan` | Generate reviewable milestones/tasks from planner context and optional Figma design context |
+| `continuum_figma_blueprint` | Build a sanitized, annotation-aware Figma Blueprint from a Figma URL |
 | `continuum_list_task_resources` | List attached task resources (files/links) with metadata and URLs |
 | `continuum_get_task_resource` | Fetch one attachment through MCP auth (inline text/image preview + metadata) |
 
@@ -117,6 +118,17 @@ Configure this server alongside the official Figma MCP server when you want desi
 
 Use Figma MCP to read frame/component context, then pass the resulting summary into
 `continuum_planner_chat` or `continuum_generate_plan` as `figma_context`.
+
+### Continuum Figma Blueprint
+
+`continuum_figma_blueprint` calls Continuum's `/figma/blueprint` endpoint and returns a compact
+semantic blueprint instead of a raw Figma node dump. It prunes noisy layers, infers layout,
+extracts tokens/components, and parses designer annotations such as `&logic: fetch-user-data`,
+`&data: user.profile`, `&api: GET /users/me`, and `&route: /settings`.
+
+Planner and AI task-generation flows also persist per-task `blueprint.json` resources. Use
+`continuum_list_task_resources` and `continuum_get_task_resource` when implementing a task to fetch
+the task-specific blueprint slice before writing UI/controller code.
 
 ---
 

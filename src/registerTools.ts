@@ -84,6 +84,20 @@ interface FigmaContext {
     tokens?: string[];
     interactions?: string[];
     screenshots?: string[];
+    blueprint?: FigmaBlueprint;
+}
+
+interface FigmaBlueprint {
+    file_key: string;
+    node_id?: string | null;
+    url: string;
+    source_name?: string | null;
+    frame_name?: string | null;
+    pruned_node_count: number;
+    raw_node_count: number;
+    digest_markdown: string;
+    flows?: Array<{ node_id: string; kind: string; value: string }>;
+    component_inventory?: Array<{ node_id: string; name: string; component_id?: string | null }>;
 }
 
 interface PlannerChatResponse {
@@ -268,6 +282,7 @@ const figmaContextSchema = z.object({
     tokens: z.array(z.string()).optional(),
     interactions: z.array(z.string()).optional(),
     screenshots: z.array(z.string()).optional(),
+    blueprint: z.unknown().optional(),
 });
 
 /** Register all Continuum MCP tools on the given server (stdio or HTTP). */
@@ -303,6 +318,43 @@ export function registerContinuumTools(server: McpServer): void {
             if (!tasks.length) return textResult('No tasks found matching the filters.');
             const lines = tasks.map(formatTaskSummary);
             return textResult(`Found ${tasks.length} task(s):\n\n${lines.join('\n\n')}`);
+        },
+    );
+
+    server.registerTool(
+        'continuum_figma_blueprint',
+        {
+            description:
+                'Build a sanitized, annotation-aware Continuum Figma Blueprint from a Figma URL. ' +
+                'Use this instead of raw Figma MCP node dumps when you need semantic layout, ' +
+                'designer &logic/&data/&api annotations, accessibility hints, and node ids for implementation. ' +
+                'Pair with continuum_list_task_resources / continuum_get_task_resource to fetch per-task blueprint.json slices.',
+            inputSchema: {
+                url: z.string().url().describe('Figma design or frame URL'),
+                node_id: z
+                    .string()
+                    .optional()
+                    .describe('Optional Figma node id override, e.g. 12:345'),
+                raw_json: z
+                    .boolean()
+                    .default(false)
+                    .describe('Return the full raw blueprint JSON after the markdown digest'),
+            },
+        },
+        async ({ url, node_id, raw_json }) => {
+            const body = { url, ...(node_id ? { node_id } : {}) };
+            const blueprint = await fetchJson<FigmaBlueprint>('POST', '/figma/blueprint', body);
+            const lines = [
+                blueprint.digest_markdown || 'Figma blueprint generated.',
+                '',
+                `Blueprint nodes: ${blueprint.pruned_node_count}/${blueprint.raw_node_count}`,
+                `Components: ${blueprint.component_inventory?.length ?? 0}`,
+                `Annotation flows: ${blueprint.flows?.length ?? 0}`,
+            ];
+            if (raw_json) {
+                lines.push('', '```json', JSON.stringify(blueprint, null, 2), '```');
+            }
+            return textResult(lines.join('\n'));
         },
     );
 
